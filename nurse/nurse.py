@@ -269,17 +269,27 @@ class action(object):
     The `perform` must be implemented for the new type, which will execute the corresponding action logic parsed from the checklist.json file. 
     """
 
+    action_counter = 0
+
     def __init__(self, configuration, data):
         self.data = data
         self.configuration = configuration
         self.silent = False
         self.extra_info = False
+        self.human = False
 
         if "priority" not in self.data:
             self.data["priority"] = self.configuration["defaults"]["priority"]
 
+    def get_action_counter():
+        action.action_counter += 1
+        return action.action_counter
+    
     def priority(self):
         return self.data["priority"]
+
+    def to_human(self):
+        self.human = True
 
     def keep_silent(self):
         # When there is no pre-defined `user` value, override it with the default value
@@ -296,16 +306,22 @@ class action(object):
     def perform(self, dry_run=False):
         pass
 
+    def _prompt_user(self, prompt, prefill):
+        if self.human:
+            return self.data["answer"]["default"]
+
+        return get_user_input(prompt, prefill)
+
     def get_user_answer(self):
         # check if user answer has already been filled out
         if self.data["answer"]["user"] != "" or self.silent:
             return
         
-        if self.extra_info:
+        if self.extra_info and not self.human:
             self.data["question"] += "\n[{}]\n Enter input: ".format(self.description())
 
         if self.data["answer"]["user"] == "" or self.data["answer"]["user"] is None:
-            self.data["answer"]["user"] = get_user_input(prompt=asciicolors.cyan("-> " + self.data["question"]), prefill=self.data["answer"]["default"])
+            self.data["answer"]["user"] = self._prompt_user(prompt=asciicolors.cyan("-> " + self.data["question"]), prefill=self.data["answer"]["default"])
             
             # if extra_info is off, when a user inputs "?", displays additional information just for this question
             if self.data["answer"]["user"] == "?" and not self.extra_info:
@@ -329,7 +345,7 @@ class action(object):
 
 class question(action):
    def perform(self, previous_answer=None, dry_run=False):
-        if not self._should_followup(previous_answer):
+        if not self._should_followup(previous_answer) and not self.human:
             return
 
         self.get_user_answer()
@@ -341,11 +357,20 @@ class question(action):
         if self._should_perform() and "followup" in self.data:
             followup_questions_by_priority = sorted([question(self.configuration, obj) for obj in self.data["followup"]], key=lambda x: x.priority(), reverse=False)
             for q in followup_questions_by_priority:
+                if self.human:
+                    q.to_human()
                 if self.silent:
                     q.keep_silent()                
-                if self.extra_info:
+                elif self.extra_info:
                     q.print_extra_info()
                 q.perform(previous_answer=self.data["answer"]["user"])
+
+   def _prompt_user(self, prompt, prefill):
+        if self.human:
+            print("{}) Answer the following question: {}".format(action.get_action_counter(), prompt))
+            return self.data["answer"]["default"]
+
+        return get_user_input(prompt, prefill)
 
    def description(self):
        if "description" in self.data:
@@ -363,6 +388,10 @@ class question(action):
         return True
 
    def _should_perform(self):
+        # for human-readable instructions we need all choice-branches to be displayed
+        if self.human:
+            return True
+
         # either the user answer or default answer kicked in
         return len(self.data["answer"]["user"]) > 0
 
@@ -382,11 +411,13 @@ class files_batch(action):
         
         self.get_user_answer()
         
-        if dry_run:
+        if self.human:
+            for path in self.data["paths"]:
+                print("{}) Attach the following file or directory: {}".format(action.get_action_counter(), path["src"]))
+        elif dry_run:
             return
-
         # Should the files batch be retrieved?
-        if self._should_perform():
+        elif self._should_perform():
             for path in self.data["paths"]:
                 if not os.path.exists(path["src"]):
                     path["status"] = "Path Not Found"
@@ -428,11 +459,13 @@ class commands_batch(action):
     def perform(self, dry_run=False):
         self.get_user_answer()
         
-        if dry_run:
+        if self.human:
+            for path in self.data["paths"]:
+                print("{}) Attach the output of the following command: {}".format(action.get_action_counter(), path["command"]))
+        elif dry_run:
             return
-
         # Should the commands_batch be executed?
-        if self._should_perform():
+        elif self._should_perform():
             for path in self.data["paths"]:
                 try:
                     command_output = subprocess.check_output(path["command"], shell=True)
@@ -575,6 +608,10 @@ class app(object):
 
         chosen_archiver = zip_archiver
 
+        if self.args.human:
+            # Override this field because it doesn't make sense to save when nothing is executed
+            self.args.dry_run = True
+
         if self.args.dry_run:
             chosen_archiver = blank_archiver
 
@@ -675,6 +712,9 @@ class app(object):
         self.nurse.introduce()
         
         for item in self.nurse.checklist():
+            if self.args.human:
+                item.to_human()
+            
             if self.args.silent:
                 # Use the default answer pre-configured in the checklist.json for the user's answers
                 item.keep_silent()
@@ -695,6 +735,7 @@ def main():
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true", help="print logs and additional information for troubleshooting the Nurse utility")
     parser.add_argument("-d", "--dry-run", dest="dry_run", action="store_true", help="run Nurse without saving any of the output")
     parser.add_argument("--extra-info", dest="extra_info", action="store_true", help="prints additional information on questions, files and commands")
+    parser.add_argument("--to-human", dest="human", action="store_true", help="provides human readable instructions instead of executing nurse.py")
     args = parser.parse_args()
 
     application = app(args)
